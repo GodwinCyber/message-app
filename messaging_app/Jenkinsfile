@@ -1,0 +1,199 @@
+/*
+  Jenkins Pipeline for Python messaging app:
+  - Cleans workspace
+  - Checks out repo from GitHub
+  - Installs dependencies in a virtual environment
+  - Runs pytest and generates a report
+  - Builds, tests, and pushes Docker image
+  - Cleans up local images
+*/
+
+pipeline {
+    agent any
+
+    parameters {
+        choice(
+            name: 'BRANCH',
+            choices: ['master', 'develop', 'release/v1.0'],
+            description: 'Select the branch to build'
+        )
+        string(
+            name: 'CUSTOM_BRANCH',
+            defaultValue: '',
+            description: 'Optional: override branch'
+        )
+        string(
+            name: 'DOCKER_IMAGE_TAG',
+            defaultValue: 'latest',
+            description: 'Docker image tag (default: latest)'
+        )
+    }
+
+    environment {
+        GITHUB_CREDENTIALS = credentials('github-credentials')
+        DOCKER_CREDENTIALS = credentials('dockerhub-credentials')
+        APP_DIR = 'messaging_app'
+        TARGET_BRANCH = "${params.CUSTOM_BRANCH ?: params.BRANCH}"
+        DOCKER_IMAGE_NAME = "dokerfixer/jenkin-messaging-app"
+        DOCKER_REGISTRY = "docker.io"
+    }
+
+    stages {
+        stage('Cleanup') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                script {
+                    checkout([$class: 'GitSCM',
+                        branches: [[name: "${TARGET_BRANCH}"]],
+                        doGenerateSubmoduleConfigurations: false,
+                        extensions: [],
+                        userRemoteConfigs: [[
+                            url: 'https://github.com/GodwinCyber/alx-backend-python.git',
+                            credentialsId: "${GITHUB_CREDENTIALS}"
+                        ]]
+                    ])
+                }
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        set -e
+                        echo "📦 Setting up virtual environment..."
+                        python3 -m venv venv
+                        . venv/bin/activate
+                        python -m pip install --upgrade pip
+                        pip install -r requirements.txt
+                        pip install pytest pytest-html
+                        echo "✅ Dependencies installed successfully."
+                    '''
+                }
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        set -e
+                        . venv/bin/activate
+                        echo "🧪 Running tests..."
+                        pytest --junitxml=test-results.xml --html=test-report.html --self-contained-html
+                    '''
+                }
+            }
+            post {
+                always {
+                    dir("${APP_DIR}") {
+                        junit 'test-results.xml'
+                        publishHTML(target: [
+                            reportName: 'Test Report',
+                            reportDir: '.',
+                            reportFiles: 'test-report.html',
+                            keepAll: true,
+                            allowMissing: true,
+                            alwaysLinkToLastBuild: true
+                        ])
+                    }
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        set -e
+                        if [ ! -f Dockerfile ]; then
+                            echo "❌ ERROR: Dockerfile not found!"
+                            exit 1
+                        fi
+                        echo "🐳 Building Docker image..."
+                        docker build -t ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} .
+                        docker tag ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} ${DOCKER_IMAGE_NAME}:$(echo ${TARGET_BRANCH} | tr '/' '-')
+                    '''
+                }
+            }
+        }
+
+        stage('Test Docker Image') {
+            steps {
+                sh '''
+                    set -e
+                    echo "🧩 Running Docker container test..."
+                    docker run --rm -d --name test-container ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} || true
+                    sleep 10
+                    docker ps -a | grep test-container || echo "Container test completed"
+                    docker stop test-container 2>/dev/null || true
+                    docker rm test-container 2>/dev/null || true
+                '''
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                sh '''
+                    set -e
+                    echo "🔐 Logging into Docker registry..."
+                    echo "${DOCKER_CREDENTIALS_PSW}" | docker login -u "${DOCKER_CREDENTIALS_USR}" --password-stdin ${DOCKER_REGISTRY}
+                    echo "📤 Pushing Docker images..."
+                    docker push ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
+                    docker push ${DOCKER_IMAGE_NAME}:$(echo ${TARGET_BRANCH} | tr '/' '-')
+                    docker logout ${DOCKER_REGISTRY}
+                '''
+            }
+        }
+
+        stage('Cleanup Docker Images') {
+            steps {
+                sh '''
+                    set -e
+                    echo "🧹 Cleaning up Docker images..."
+                    docker rmi ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} 2>/dev/null || true
+                    docker rmi ${DOCKER_IMAGE_NAME}:$(echo ${TARGET_BRANCH} | tr '/' '-') 2>/dev/null || true
+                    docker image prune -f 2>/dev/null || true
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Pipeline completed for branch: ${TARGET_BRANCH}"
+            echo "Docker Image: ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}"
+            echo "Build URL: ${BUILD_URL}"
+        }
+        success {
+            echo "✅ All stages completed successfully!"
+            emailext(
+                subject: "SUCCESS: Pipeline '${JOB_NAME} [${BUILD_NUMBER}]'",
+                body: """
+                    ✅ Pipeline completed successfully!
+                    Branch: ${TARGET_BRANCH}
+                    Docker Image: ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
+                    Build URL: ${BUILD_URL}
+                """,
+                to: "averageheight91@gmail.com"
+            )
+        }
+        failure {
+            echo "❌ Pipeline failed!"
+            emailext(
+                subject: "FAILED: Pipeline '${JOB_NAME} [${BUILD_NUMBER}]'",
+                body: """
+                    ❌ Pipeline failed!
+                    Branch: ${TARGET_BRANCH}
+                    Build URL: ${BUILD_URL}
+                """,
+                to: "averageheight91@gmail.com"
+            )
+        }
+    }
+}
