@@ -12,8 +12,14 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        exclude = ['password', 'last_login', 'is_superuser', 'is_staff', 'is_active', 'date_joined', 'groups', 'user_permissions']
-        read_only_fields = ['user_id', 'created_at']
+        fields = ['user_id', 'email', 'password', 'phone_number', 'username', 'first_name', 'last_name', 'full_name']
+        extra_kwargs = {
+            'password': {'write_only': True}
+        }
+
+    def get_full_name(self, obj):
+        """Return formatted full name."""
+        return f"{obj.first_name} {obj.last_name}".strip()
 
     def create(self, validated_data):
         '''Hash password properly on user creation'''
